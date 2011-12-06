@@ -79,6 +79,13 @@ func (encoder *Encoder) encodeInt(value int64) error {
 		return encoder.encodeString(strconv.Itoa64(value))
 	}
 
+	if value >= 0x20000000 {
+		if value < 0x7fffffff {	
+			return encoder.encodeFloat(float64(value))	
+		}
+		return encoder.encodeString(strconv.Itoa64(value))
+	}
+
 	err := encoder.writeMarker(INTEGER_MARKER)
 	if err != nil {
 		return err

@@ -1,1 +1,51 @@
-This is a adobe amf library for golang. As you know amf has defined many 
+First of all, please forgive my poor english.
+
+This is an adobe amf library for golang. As you know amf has defined many types that go does not
+support, for those types, this library just ignored. This library has implmented amf3.
+
+Endode:
+Encode means to map go types to amf types, there is serveral rules you should know
+1. go string will be encode to amf string, the length should be no longer thant a u29
+2. go int8, int16 will be encode as amf integer, e.g u29
+3. go int64, int32, int, if it lies in [-0xfffffff, 0x20000000), it will be encoded as u29,
+if it lies in [-0x7fffffff, -0xfffffff], it will be encoded as double,
+otherwise, it will be encoded as string
+4. go uint8, uint16 will be encode as amf integer
+5. go uint64, uint32, uint, if it lies in [0, 0x2000000), it will be encoded as u29,
+if it lies in [0x20000000, 0x7fffffff], it will be encoded as double,
+otherwise, it will be encoded as string
+6. go float32, float64 will be encoded as double
+7. go array, slice will be encoded as amf array, emca array does not supported
+8. go map, struct will be encoded as amf object, only amf dynamic object supported
+9. other types not listed above will not supported
+
+NOTICE:
+Because struct is passed by value, so just for effient, you should pass the top level struct as
+pointer, or it will return an error. Struct field name will be encoded as object key follows such
+rules:
+1. if field has tag "amf.name", the tag will be used.
+2. encoder configed as reserved, the field name will be used.
+3. encoder configed as not reserved, the first rune of field name will be transfered to lower
+4. if field can't be accssed, ignore
+
+Usage:
+
+encoder := amf.NewEncoder(writer, true)
+err := encoder.Encode(xxx)
+if err != nil {
+	xxx	
+}
+
+Decode:
+Decode means to map amf types to go types, the rule is the same as encoding.
+As you can see, many go types may map to only one amf type, so decoder supports
+that you specifys a template type.
+
+Usage:
+
+decoder := amf.NewDecoder(reader)
+ret, err := decoder.Decode(template)
+if err != nil {
+	xxx
+}
+
