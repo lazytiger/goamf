@@ -1,11 +1,6 @@
 package amf
 
-//任意类型，代表AMF中所有类型，比如
-//对象，其实是一个key/value对，用map表示
-//数组，其实是一个任意类型的数组，用array表示
-//整数，用于表示u29
-//浮点数，用于表示double
-//字符串，用于表示string
+//anything in amf
 type AMFAny interface{}
 
 const (
