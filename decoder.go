@@ -15,15 +15,19 @@ import (
 type Decoder struct {
 	reader      io.Reader
 	stringCache []string
-	objectCache []AMFAny
+	objectCache []reflect.Value
 }
 
 func NewDecoder(reader io.Reader) *Decoder {
 	decoder := new(Decoder)
 	decoder.reader = reader
-	decoder.objectCache = make([]AMFAny, 0, 10)
-	decoder.stringCache = make([]string, 0, 10)
+	decoder.Reset()
 	return decoder
+}
+
+func (decoder *Decoder) Reset() {
+	decoder.objectCache = make([]reflect.Value, 0, 10)
+	decoder.stringCache = make([]string, 0, 10)
 }
 
 func (decoder *Decoder) getField(key string, t reflect.Type) (reflect.StructField, bool) {
@@ -50,283 +54,69 @@ func (decoder *Decoder) getField(key string, t reflect.Type) (reflect.StructFiel
 	return *new(reflect.StructField), false
 }
 
-func (decoder *Decoder) Decode(tpl reflect.Type) (AMFAny, error) {
-
+func (decoder *Decoder) decode(value reflect.Value) error {
+	
 	marker, err := decoder.readMarker()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	pointerLevel := 0
-	if tpl != nil {
-		for tpl.Kind() == reflect.Ptr {
-			tpl = tpl.Elem()
-			pointerLevel++
+	//处理空指针的情况
+	if marker == NULL_MARKER {
+		if value.IsNil() {
+			return nil
 		}
-	}
 
-	var ret AMFAny
-	i := 0
-
-	switch marker {
-	case FALSE_MARKER:
-		ret = false
-	case TRUE_MARKER:
-		ret = true
-	case STRING_MARKER:
-		ret, err = decoder.readString(tpl)
-	case DOUBLE_MARKER:
-		ret, err = decoder.readFloat(tpl)
-	case INTEGER_MARKER:
-		ret, err = decoder.readInteger(tpl)
-	case NULL_MARKER:
-		ret = nil
-	case ARRAY_MARKER:
-		ret, err = decoder.readSlice(tpl)
-	case OBJECT_MARKER:
-		ret, err = decoder.readObject(tpl)
-		if tpl != nil && tpl.Kind() == reflect.Struct {
-			i = 1
+		switch value.Kind() {
+		case reflect.Interface, reflect.Slice, reflect.Map, reflect.Ptr:
+			value.Set(reflect.Zero(value.Type()))
+			return nil
+		default:
+			return errors.New("invalid type:" + value.Type().String() + " for nil")
 		}
-	default:
-		return nil, errors.New("unsupported marker:" + strconv.Itoa(int(marker)))
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	if tpl == nil {
-		return ret, nil
-	}
-
-	if ret == nil && tpl != nil {
-		for ; i < pointerLevel; i++ {
-			tpl = reflect.PtrTo(tpl)
-		}
-		return reflect.Zero(tpl).Interface(), nil
 	}
 	
-	v := reflect.ValueOf(ret)
-	if i > pointerLevel {
-		return reflect.Indirect(v).Interface(), nil
+	if value.Kind() == reflect.Interface {
+		v := reflect.ValueOf(value.Interface())
+		if v.Kind() == reflect.Ptr {
+			value = v
+		}
 	}
 
-	for ; i < pointerLevel; i++ {
-		v = v.Addr()
+	//如果当前为空指针则初始化
+	for value.Kind() == reflect.Ptr {
+		if value.IsNil() {
+			value.Set(reflect.New(value.Type().Elem()))
+		}
+		value = value.Elem()
+	}
+	
+	switch marker {
+	case FALSE_MARKER:
+		return decoder.setBool(value, false)
+	case TRUE_MARKER:
+		return decoder.setBool(value, true)
+	case STRING_MARKER:
+		return decoder.readString(value)
+	case DOUBLE_MARKER:
+		return decoder.readFloat(value)
+	case INTEGER_MARKER:
+		return decoder.readInteger(value)
+	case ARRAY_MARKER:
+		return decoder.readSlice(value)
+	case OBJECT_MARKER:
+		return decoder.readObject(value)
+	default:
+		return errors.New("unsupported marker:" + strconv.Itoa(int(marker)))
 	}
 
-	return v.Interface(), nil
+	return nil
 }
 
-func (decoder *Decoder) readObject(tpl reflect.Type) (AMFAny, error) {
-
-	index, err := decoder.readU29()
-	if err != nil {
-		return nil, err
-	}
-
-	if (index & 0x01) == 0 {
-		return decoder.objectCache[int(index>>1)], nil
-	}
-
-	if index != 0x0b {
-		return nil, errors.New("invalid object type")
-	}
-
-	sep, err := decoder.readMarker()
-	if err != nil {
-		return nil, err
-	}
-
-	if sep != 0x01 {
-		return nil, errors.New("ecma array not allowed")
-	}
-
-	if tpl == nil {
-		ret := make(map[string]AMFAny)
-		decoder.objectCache = append(decoder.objectCache, ret)
-
-		for {
-			key, err := decoder.readString(nil)
-			if err != nil {
-				return nil, err
-			}
-
-			if key == "" {
-				break
-			}
-
-			value, err := decoder.Decode(nil)
-			if err != nil {
-				return nil, err
-			}
-
-			ret[key.(string)] = value
-		}
-		return ret, nil
-	}
-
-	if tpl.Kind() == reflect.Map {
-		et := tpl.Elem()
-		ret := reflect.MakeMap(tpl)
-		decoder.objectCache = append(decoder.objectCache, ret)
-
-		for {
-			key, err := decoder.readString(nil)
-			if err != nil {
-				return nil, err
-			}
-
-			if key == "" {
-				break
-			}
-
-			value, err := decoder.Decode(et)
-			if err != nil {
-				return nil, err
-			}
-
-			ret.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
-		}
-		return ret.Interface(), nil
-	}
-
-	if tpl.Kind() != reflect.Struct {
-		return nil, errors.New("struct type expected, found:" + tpl.String())
-	}
-
-	ret := reflect.New(tpl)
-	decoder.objectCache = append(decoder.objectCache, ret.Interface())
-	ret = reflect.Indirect(ret)
-
-	for {
-		key, err := decoder.readString(nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if key == "" {
-			break
-		}
-
-		f, ok := decoder.getField(key.(string), tpl)
-		if !ok {
-			return nil, errors.New("key:" + key.(string) + " not found in struct:" + tpl.String())
-		}
-
-		value, err := decoder.Decode(f.Type)
-		if err != nil {
-			return nil, err
-		}
-
-		ret.FieldByName(f.Name).Set(reflect.ValueOf(value))
-	}
-
-	//println(ret.Addr().Type().String())
-	return ret.Addr().Interface(), nil
-}
-
-func (decoder *Decoder) readSlice(tpl reflect.Type) (AMFAny, error) {
-
-	index, err := decoder.readU29()
-	if err != nil {
-		return nil, err
-	}
-
-	if (index & 0x01) == 0 {
-		return decoder.objectCache[int(index>>1)], nil
-	}
-
-	index >>= 1
-	sep, err := decoder.readMarker()
-	if err != nil {
-		return nil, err
-	}
-
-	if sep != 0x01 {
-		return nil, errors.New("ecma array not allowed")
-	}
-
-	if tpl == nil {
-		ret := make([]AMFAny, index)
-		decoder.objectCache = append(decoder.objectCache, ret)
-
-		for i, _ := range ret {
-			ret[i], err = decoder.Decode(nil)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		return ret, nil
-	}
-
-	if tpl.Kind() != reflect.Array && tpl.Kind() != reflect.Slice {
-		return nil, errors.New("type:" + tpl.String() + " is not allowed for array")
-	}
-
-	et := tpl.Elem()
-	ret := reflect.MakeSlice(tpl, int(index), int(index))
-	decoder.objectCache = append(decoder.objectCache, ret.Interface())
-
-	for i := 0; i < int(index); i++ {
-		v, err := decoder.Decode(et)
-		if err != nil {
-			return nil, err
-		}
-
-		ret.Index(i).Set(reflect.ValueOf(v))
-	}
-
-	return ret.Interface(), nil
-}
-
-func (decoder *Decoder) readInteger(tpl reflect.Type) (AMFAny, error) {
-	uv, err := decoder.readU29()
-	if err != nil {
-		return nil, err
-	}
-
-	if tpl == nil {
-		return uv, nil
-	}
-
-	vv := int32(uv)
-	if uv > 0xfffffff {
-		vv = int32(uv - 0x20000000)
-	}
-
-	switch tpl.Kind() {
-	case reflect.Int8:
-		return int8(vv), nil
-	case reflect.Int16:
-		return int16(vv), nil
-	case reflect.Int32:
-		return int32(vv), nil
-	case reflect.Int64:
-		return int64(vv), nil
-	case reflect.Int:
-		return int(vv), nil
-	case reflect.Uint8:
-		return uint8(uv), nil
-	case reflect.Uint16:
-		return uint16(uv), nil
-	case reflect.Uint32:
-		return uint32(uv), nil
-	case reflect.Uint64:
-		return uint64(uv), nil
-	case reflect.Uint:
-		return uint(uv), nil
-	}
-
-	return nil, errors.New("invalid type:" + tpl.String() + " for integer")
-}
-
-func (decoder *Decoder) readFloat(tpl reflect.Type) (AMFAny, error) {
+func (decoder *Decoder) readFloat(value reflect.Value) error {
 	bytes, err := decoder.readBytes(8)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	n := uint64(0)
@@ -336,118 +126,265 @@ func (decoder *Decoder) readFloat(tpl reflect.Type) (AMFAny, error) {
 	}
 
 	v := math.Float64frombits(n)
-	if tpl == nil {
-		return v, nil
+
+	switch value.Kind() {
+	case reflect.Float32, reflect.Float64:
+		value.SetFloat(v)
+	case reflect.Int32, reflect.Int, reflect.Int64:
+		value.SetInt(int64(v))
+	case reflect.Uint32, reflect.Uint, reflect.Uint64:
+		value.SetUint(uint64(v))
+	case reflect.Interface:
+		value.Set(reflect.ValueOf(v))
+	default:
+		return errors.New("invalid type:" + value.Type().String() + " for double")
 	}
 
-	switch tpl.Kind() {
-	case reflect.Float32:
-		return float32(v), nil
-	case reflect.Float64:
-		return v, nil
-	case reflect.Uint32:
-		return uint32(v), nil
-	case reflect.Int32:
-		return int32(v), nil
-	}
-
-	return nil, errors.New("invalid type:" + tpl.String() + " for double")
+	return nil
 }
 
-func (decoder *Decoder) readString(tpl reflect.Type) (AMFAny, error) {
+func (decoder *Decoder) readInteger(value reflect.Value) error {
+
+	uv, err := decoder.readU29()
+	if err != nil {
+		return err
+	}
+
+	vv := int32(uv)
+	if uv > 0xfffffff {
+		vv = int32(uv - 0x20000000)
+	}
+
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		value.SetInt(int64(vv))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		value.SetUint(uint64(uv))
+	case reflect.Interface:
+		value.Set(reflect.ValueOf(uv))
+	default:
+		return errors.New("invalid type:" + value.Type().String() + " for integer")
+	}
+
+	return nil
+}
+
+func (decoder *Decoder) readString(value reflect.Value) error {
+
 	index, err := decoder.readU29()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
+	ret := ""
 	if (index & 0x01) == 0 {
-		return decoder.stringCache[int(index>>1)], nil
-	}
+		ret = decoder.stringCache[int(index>>1)]
+	} else {
+		index >>= 1
+		bytes, err := decoder.readBytes(int(index))
+		if err != nil {
+			return err
+		}
 
-	index >>= 1
-	bytes, err := decoder.readBytes(int(index))
-	if err != nil {
-		return "", err
+		ret = string(bytes)
 	}
-
-	ret := string(bytes)
+	
 	if ret != "" {
 		decoder.stringCache = append(decoder.stringCache, ret)
 	}
-	if tpl == nil {
-		return ret, nil
-	}
 
-	switch tpl.Kind() {
-	case reflect.Int32:
-		num, err := strconv.Atoi(ret)
-		if err != nil {
-			return nil, err
-		}
-
-		return int32(num), nil
-	case reflect.Int:
-		num, err := strconv.Atoi(ret)
-		if err != nil {
-			return nil, err
-		}
-
-		return int(num), nil
-	case reflect.Uint32:
-		num, err := strconv.Atoui(ret)
-		if err != nil {
-			return nil, err
-		}
-
-		return uint32(num), nil
-	case reflect.Uint:
-		num, err := strconv.Atoui(ret)
-		if err != nil {
-			return nil, err
-		}
-
-		return uint(num), nil
-	case reflect.Int64:
+	switch value.Kind() {
+	case reflect.Int, reflect.Int32, reflect.Int64:
 		num, err := strconv.Atoi64(ret)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
-		return num, nil
-	case reflect.Uint64:
+		value.SetInt(num)
+	case reflect.Uint, reflect.Uint32, reflect.Uint64:
 		num, err := strconv.Atoui64(ret)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
-		return num, nil
+		value.SetUint(num)
 	case reflect.String:
-		return ret, nil
+		value.SetString(ret)
+	case reflect.Interface:
+		value.Set(reflect.ValueOf(ret))
+	default:
+		return errors.New("invalid type:" + value.Type().String() + " for string")
 	}
 
-	return nil, errors.New("invalid type:" + tpl.String() + " for string")
+	return nil
 }
 
-func (decoder *Decoder) readBytes(length int) ([]byte, error) {
-	buffer := make([]byte, length)
-	for length != 0 {
-		l, err := decoder.reader.Read(buffer)
-		if err != nil {
-			return nil, err
-		}
-		length -= l
-	}
+func (decoder *Decoder) readObject(value reflect.Value) error {
 
-	return buffer, nil
-}
-
-func (decoder *Decoder) readMarker() (byte, error) {
-	bytes, err := decoder.readBytes(1)
+	index, err := decoder.readU29()
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	return bytes[0], nil
+	if (index & 0x01) == 0 {
+		value.Set(decoder.objectCache[int(index>>1)])
+		return nil
+	}
+
+	if index != 0x0b {
+		return errors.New("invalid object type")
+	}
+
+	sep, err := decoder.readMarker()
+	if err != nil {
+		return err
+	}
+
+	if sep != 0x01 {
+		return errors.New("type object not allowed")
+	}
+
+	if value.Kind() == reflect.Interface {
+		var dummy map[string]AMFAny
+		v := reflect.MakeMap(reflect.TypeOf(dummy))
+		value.Set(v)
+		value = v
+	}
+
+	if value.Kind() == reflect.Map {
+		if value.IsNil() {
+			v := reflect.MakeMap(value.Type())
+			value.Set(v)
+			value = v
+		}
+		
+		decoder.objectCache = append(decoder.objectCache, value)
+
+		for {
+			key := ""
+			err = decoder.readString(reflect.ValueOf(&key).Elem())
+			if err != nil {
+				return err
+			}
+			
+
+			if key == "" {
+				break
+			}
+
+			v := reflect.New(value.Type().Elem())
+			err = decoder.decode(v)
+			if err != nil {
+				return err
+			}
+
+			value.SetMapIndex(reflect.ValueOf(key), v.Elem())
+		}
+		
+		return nil
+	}
+
+	if value.Kind() != reflect.Struct {
+		return errors.New("struct type expected, found:" + value.Type().String())
+	}
+	
+
+	decoder.objectCache = append(decoder.objectCache, value)
+
+	for {
+	
+		key := ""
+		err = decoder.readString(reflect.ValueOf(&key).Elem())
+		if err != nil {
+			return err
+		}
+		
+		if key == "" {
+			break
+		}
+
+		f, ok := decoder.getField(key, value.Type())
+		if !ok {
+			return errors.New("key:" + key + " not found in struct:" + value.Type().String())
+		}
+		
+		err = decoder.decode(value.FieldByName(f.Name))
+		if err != nil {
+			return err
+		}
+	}
+	
+	return nil
+}
+
+func (decoder *Decoder) readSlice(value reflect.Value) error {
+
+	index, err := decoder.readU29()
+	if err != nil {
+		return err
+	}
+
+	if (index & 0x01) == 0 {
+		slice := decoder.objectCache[int(index>>1)]
+		value.Set(slice)
+		return nil
+	}
+
+	index >>= 1
+	sep, err := decoder.readMarker()
+	if err != nil {
+		return err
+	}
+
+	if sep != 0x01 {
+		return errors.New("ecma array not allowed")
+	}
+	
+	if value.IsNil() {
+		var v reflect.Value
+		if value.Type().Kind() == reflect.Slice {
+			v = reflect.MakeSlice(value.Type(), int(index), int(index))
+		} else if value.Type().Kind() == reflect.Interface {
+			v = reflect.ValueOf(make([]AMFAny,int(index), int(index)))
+		} else {
+			return errors.New("invalid type:" + value.Type().String() + " for array")
+		}
+		value.Set(v)
+		value = v
+	}
+	
+	decoder.objectCache = append(decoder.objectCache, value)
+	
+	for i := 0; i < int(index); i++ {
+		c := value.Index(i)
+		err = decoder.decode(c)
+		if err != nil {
+			return err
+		}
+	}
+	
+	return nil
+}
+
+func (decoder *Decoder) setBool(value reflect.Value, v bool) error {
+
+	switch value.Kind() {
+		case reflect.Bool:
+		value.SetBool(v)
+	case reflect.Interface:
+		value.Set(reflect.ValueOf(v))
+	default:
+		return errors.New("invalid type:" + value.Type().String() + " for bool")
+	}
+	return nil
+}
+
+func (decoder *Decoder) Decode(value AMFAny) error {
+	return decoder.decode(reflect.ValueOf(value))
+}
+
+func (decoder *Decoder) DecodeValue(value reflect.Value) error {
+	return decoder.decode(value)
 }
 
 func (decoder *Decoder) readU29() (uint32, error) {
@@ -470,4 +407,26 @@ func (decoder *Decoder) readU29() (uint32, error) {
 	}
 
 	return ret, nil
+}
+
+func (decoder *Decoder) readBytes(length int) ([]byte, error) {
+	buffer := make([]byte, length)
+	for length != 0 {
+		l, err := decoder.reader.Read(buffer)
+		if err != nil {
+			return nil, err
+		}
+		length -= l
+	}
+
+	return buffer, nil
+}
+
+func (decoder *Decoder) readMarker() (byte, error) {
+	bytes, err := decoder.readBytes(1)
+	if err != nil {
+		return 0, err
+	}
+
+	return bytes[0], nil
 }

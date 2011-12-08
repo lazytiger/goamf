@@ -38,13 +38,14 @@ if err != nil {
 
 Decode:
 Decode means to map amf types to go types, the rule is the same as encoding.
-As you can see, many go types may map to only one amf type, so decoder supports
-that you specifys a template type.
+As you can see, many go types may map to only one amf type, so decoder support to specify
+a concrete value
 
 Usage:
 
 decoder := amf.NewDecoder(reader)
-ret, err := decoder.Decode(template)
+ret := new(xxx)
+err := decoder.Decode(ret)
 if err != nil {
 	xxx
 }

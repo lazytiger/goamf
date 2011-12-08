@@ -19,6 +19,11 @@ type Encoder struct {
 	reservStruct bool
 }
 
+func (encoder *Encoder) Reset(){
+	encoder.objectCache = make(map[uintptr]int)
+	encoder.stringCache = make(map[string]int)
+}
+
 func (encoder *Encoder) getFieldName(f reflect.StructField) string {
 	chars := []rune(f.Name)
 	if unicode.IsLower(chars[0]) {
@@ -78,13 +83,6 @@ func (encoder *Encoder) encodeInt(value int64) error {
 	if value < -0xfffffff {
 		if value > -0x7fffffff {
 			return encoder.encodeFloat(float64(value))
-		}
-		return encoder.encodeString(strconv.Itoa64(value))
-	}
-
-	if value >= 0x20000000 {
-		if value < 0x7fffffff {	
-			return encoder.encodeFloat(float64(value))	
 		}
 		return encoder.encodeString(strconv.Itoa64(value))
 	}
@@ -167,7 +165,7 @@ func (encoder *Encoder) encodeMap(value reflect.Value) error {
 			v = v.Addr()
 		}
 
-		err = encoder.Encode(v.Interface())
+		err = encoder.encode(v)
 		if err != nil {
 			return err
 		}
@@ -221,7 +219,7 @@ func (encoder *Encoder) encodeStruct(value reflect.Value) error {
 				fv = fv.Addr()
 			}
 
-			err = encoder.Encode(fv.Interface())
+			err = encoder.encode(fv)
 			if err != nil {
 				return err
 			}
@@ -265,18 +263,17 @@ func (encoder *Encoder) encodeSlice(value reflect.Value) error {
 		if v.Kind() == reflect.Struct {
 			v = v.Addr()
 		}
-		err = encoder.Encode(v.Interface())
+		err = encoder.encode(v)
 		if err != nil {
-			return nil
+			return err
 		}
 	}
 
 	return nil
 }
 
-func (encoder *Encoder) Encode(value AMFAny) error {
+func (encoder *Encoder) encode(v reflect.Value) error {
 
-	v := reflect.ValueOf(value)
 	switch v.Kind() {
 	case reflect.Map:
 		return encoder.encodeMap(v)
@@ -293,6 +290,9 @@ func (encoder *Encoder) Encode(value AMFAny) error {
 		return encoder.encodeSlice(v)
 	case reflect.Float64, reflect.Float32:
 		return encoder.encodeFloat(v.Float())
+	case reflect.Interface:
+		v = reflect.ValueOf(v.Interface())
+		return encoder.encode(v)
 	case reflect.Ptr:
 		if v.IsNil() {
 			return encoder.encodeNull()
@@ -301,10 +301,16 @@ func (encoder *Encoder) Encode(value AMFAny) error {
 		if vv.Kind() == reflect.Struct {
 			return encoder.encodeStruct(v)
 		}
-		return encoder.Encode(vv.Interface())
+		return encoder.encode(vv)
 	}
 
 	return errors.New("unsupported type:" + v.Type().String())
+}
+
+func (encoder *Encoder) Encode(value AMFAny) error {
+
+	v := reflect.ValueOf(value)
+	return encoder.encode(v)
 }
 
 func (encoder *Encoder) writeString(value string) error {
@@ -370,8 +376,7 @@ func NewEncoder(writer io.Writer, reservStruct bool) *Encoder {
 
 	encoder := new(Encoder)
 	encoder.writer = writer
-	encoder.objectCache = make(map[uintptr]int)
-	encoder.stringCache = make(map[string]int)
 	encoder.reservStruct = reservStruct
+	encoder.Reset()
 	return encoder
 }

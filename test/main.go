@@ -1,6 +1,3 @@
-// Copyright 2011 baihaoping@gmail.com. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
 package main
 
 import (
@@ -8,7 +5,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"reflect"
 )
 
 type Abc struct {
@@ -16,7 +12,12 @@ type Abc struct {
 	Uid int32
 }
 
+type None interface{}
+
 type Test struct {
+	Struct Abc
+	Map map[string]*Abc
+	Slice []*Abc
 	String string "amf.name:\"str\""
 	Uint	uint
 	Uint8 	uint8
@@ -30,13 +31,13 @@ type Test struct {
 	Int64 int64
 	Float32 float32
 	Float64 float64
-	Map map[string]*Abc
-	Slice []*Abc
-	Struct Abc
+	Pointer *string
 	Null *Abc
+	None None
 }
 
 func main() {
+	
 	writer := bytes.NewBuffer(make([]byte, 0, 1024000))
 	encoder := amf.NewEncoder(writer, false)
 	t := new(Test)
@@ -53,6 +54,10 @@ func main() {
 	t.Slice[0] = new(Abc)
 	t.String = "测试"
 	t.Struct.Uname = "hello"
+	t.Pointer = new(string)
+	*t.Pointer = "hello"
+	s := "fuck"
+	t.None = &s
 	err := encoder.Encode(t)
 	if err != nil {
 		println(err.Error())
@@ -63,13 +68,18 @@ func main() {
 	reader := bytes.NewBuffer(writer.Bytes())
 	decoder := amf.NewDecoder(reader)
 	
-	var a Test
-	v, err := decoder.Decode(reflect.TypeOf(a))
+	a := new(Test)
+	ss := new(string)
+	a.None = ss
+	b := new(string)
+	a.Pointer = b
+	err = decoder.Decode(a)
 	if err != nil {
-		fmt.Println(err.Error())
+		println(err.Error())
 		return
 	}
 
-	a = v.(Test)
 	fmt.Println(a)
+	fmt.Println(*b)
+	fmt.Println("return:", *ss)
 }
